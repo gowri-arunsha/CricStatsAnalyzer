@@ -9,8 +9,6 @@ from google.cloud import bigquery
 from google.cloud.exceptions import NotFound
 import xmltodict
 import json
-#import os
-
 
 #GCS connection information
 project_id='cric-stats-analyzer'
@@ -18,7 +16,7 @@ bucket_name='cric-stats-bucket'
 source_folder='raw_data'
 destination_folder='processed_data'
 dataset_id='cricsheet_data'
-table_name='test_data'
+table_name='odi_data'
 
 def gcs_import():
     try:
@@ -26,28 +24,25 @@ def gcs_import():
         client=storage.Client(project=project_id)
         bucket=client.bucket(bucket_name)
         blobs=bucket.list_blobs(prefix=source_folder)
-        #BigQuery connections
+        #BigQuery Connections
         bq_client  = bigquery.Client(project = project_id)
-        try:    
-            bq_dataset  = bq_client.dataset(dataset_id)
-            table_ref = dataset.table(table_name)
-            #?
-            print(client.get_table(table_ref))
+        bq_dataset  = bq_client.dataset(dataset_id)
+        try:
+            table_ref = bq_dataset.table(table_name)
+            print(table_ref)
         except NotFound:
             print('Table Not Found')
-
-        print(bq_dataset)
-        #table = dataset.table(table_id)
-
+        
         #batch counter
         count=0
         batch_data=[]
         for blob in blobs:
             print(blob.name)
-            if(blob.name.endswith(".xml") and not blob.name.startswith("raw_data/processed_")):      #batch size max
-                #batch processing files
+            #should the files be remaned as processed_?  and not blob.name.startswith("raw_data/processed_")):      #batch size max
+            if(blob.name.endswith(".xml")):
                 if(count<1000):
                     jsonl=xml_to_jsonl(client, bucket, blob)
+                    bucket.rename_blob(blob, new_name=blob.name.replace('raw_data/', 'updated_data/'))
                     if(jsonl!=0):
                         batch_data.append(jsonl)
                     print(batch_data)
@@ -55,28 +50,16 @@ def gcs_import():
                 else:
                     #load job config
                     print("load the job")
+                    bq_load_job(bq_client,batch_data,table_ref)
                     count=0
                     batch_data=[]
 
-                ##REMOVE THIS COMMENT
-                #bucket.rename_blob(blob, new_name=blob.name.replace('raw_data/', 'raw_data/processed_'))
         if len(batch_data)!=0:
             print("load job")
-
-                #use extends() ?
+            bq_load_job(bq_client,batch_data,table_ref)
 
     except Exception as e:
         print("GCS IMPORT ERROR:",e)
-
-# #WORKING FUNCTION
-# def bq_upload(batch):
-#     client=storage.Client(project_id)
-#     bucket=client.bucket(bucket_name)
-#     blobs=bucket.list_blobs(prefix=destination_folder)
-#     count=0
-#     for blob in blobs:
-#         print(blob.name)
-
 
 def xml_to_jsonl(client, bucket, blob):
     data_new={}
@@ -86,7 +69,6 @@ def xml_to_jsonl(client, bucket, blob):
                 data_dict = xmltodict.parse(xml_file.read())
                 data_dict=data_dict["cricsheet"]
 
-            #data_new={}
             if 'info' in data_dict and 'innings' in data_dict and \
             'match_type_number' in data_dict['info'] and 'match_type' in data_dict['info'] and \
             'lineups' in data_dict['info'] and 'lineup' in data_dict['info']['lineups'] and \
@@ -109,42 +91,28 @@ def xml_to_jsonl(client, bucket, blob):
                 blob_new = bucket.blob(object_name)
                 with blob_new.open('w') as jsonl_file:
                     jsonl_file.write(json.dumps(data_new))
-                    #\n required?
                 print("Blob new:",blob_new)
-                #remove this file from raw folder
                 return data_new
-
             else:
                 print("Data check not passed. Schema doesn't match requirements")
                 return 0
         except Exception as e:
             print("CANT OPEN FILE! error:",e)
-            
-        #Write JSON objects as lines in the JSONL file
-
-        # with blob_new.open('w') as jsonl_file:
-        #     jsonl_file.write(json.dumps(data_new) + '\n')
-        #     print("Blob new:",blob_new)
-
-
-        # with blob_new.open('w') as jsonl_file:
-        #     root_key = list(data_dict.keys())[0] if data_dict else None
-        #     if root_key and isinstance(data_dict[root_key], list):
-        #         for item in data_dict[root_key]:
-        #             jsonl_file.write(json.dumps(item) + '\n')
-        #     else:
-        #         jsonl_file.write(json.dumps(data_dict) + '\n')
-        #     print("Blob new:",blob_new)
-
-
-
-
 
     except Exception as e:
         print("XML TO JSON CONVERSION ERROR:",e)
-    # Read XML file and convert to JSON
-    
 
+def bq_load_job(client,batch_data,table):
+    job_config = bigquery.LoadJobConfig(
+        write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
+        source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
+        #schema=table_schema,
+        autodetect=True,
+        create_disposition=bigquery.CreateDisposition.CREATE_IF_NEEDED,
+    )
+
+    load_job = client.load_table_from_json(batch_data, table, job_config = job_config)
+    load_job.result()
 
 #DAG default parameters
 default_args = {
@@ -166,6 +134,7 @@ test_dag=DAG(
     schedule=None,
 )
 
+#set task for each folder
 #TASKS
 gcs_import_task=PythonOperator(
     task_id='gcs_import_task',
@@ -173,28 +142,5 @@ gcs_import_task=PythonOperator(
     dag=test_dag,
 )
 
-# bq_upload_task=PythonOperator(
-#     task_id='bq_upload_task',
-#     python_callable=bq_upload,
-#     op_args=[1000],
-#     dag=test_dag,
-# )
-
-
-# upload_gcs_to_bq_task = GCSToBigQueryOperator(
-#     task_id='upload_gcs_to_bq_task',
-#     bucket=bucket_name,
-#     source_objects=['processed_data/693431.jsonl'], #only .jsonl files
-#     destination_project_dataset_table=f'{project_id}.cricsheet_data.test_table',
-#     schema_fields=None,  # Autodetect schema
-#     source_format='NEWLINE_DELIMITED_JSON',
-#     create_disposition='CREATE_IF_NEEDED',  # Options: 'CREATE_NEVER', 'CREATE_IF_NEEDED'
-#     write_disposition='WRITE_APPEND',  # Options: 'WRITE_TRUNCATE', 'WRITE_APPEND', 'WRITE_EMPTY'
-#     autodetect=True,
-#     dag=test_dag,
-# )
-
 #task dependencies
 gcs_import_task
-#>>bq_upload_task
-#>>upload_gcs_to_bq_task
