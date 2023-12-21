@@ -9,40 +9,49 @@ from google.cloud import bigquery
 from google.cloud.exceptions import NotFound
 import xmltodict
 import json
+import os
+import logging
+
+logging.basicConfig(level=logging.INFO)
 
 #GCS connection information
 project_id='cric-stats-analyzer'
 bucket_name='cric-stats-bucket'
-source_folder='raw_data'
-destination_folder='processed_data'
+raw_folder='raw_data'
+processed_folder='processed_data'
 dataset_id='cricsheet_data'
-table_name='odi_data'
+table_name='cric_data'
 
 def gcs_import():
     try:
         #Storage Connections
         client=storage.Client(project=project_id)
         bucket=client.bucket(bucket_name)
-        blobs=bucket.list_blobs(prefix=source_folder)
+        
         #BigQuery Connections
         bq_client  = bigquery.Client(project = project_id)
         bq_dataset  = bq_client.dataset(dataset_id)
+        #table_id=f'{project_id}.{dataset_id}.{table_name}'
         try:
             table_ref = bq_dataset.table(table_name)
-            print(table_ref)
+            logging.info(f'Table Reference: {table_ref}')
         except NotFound:
-            print('Table Not Found')
-        
+            logging.error(f'Table Reference not found for {table_name}')
+
+        #list of files in raw data folder
+        blobs=bucket.list_blobs(prefix=raw_folder)
+
         #batch counter
         count=0
         batch_data=[]
         for blob in blobs:
-            print(blob.name)
-            #should the files be remaned as processed_?  and not blob.name.startswith("raw_data/processed_")):      #batch size max
+            print("Processing file:",blob.name)
             if(blob.name.endswith(".xml")):
+                #assumption of batch data of 1000 files at a time
                 if(count<1000):
                     jsonl=xml_to_jsonl(client, bucket, blob)
-                    bucket.rename_blob(blob, new_name=blob.name.replace('raw_data/', 'updated_data/'))
+                    #move to updated folder
+                    #bucket.rename_blob(blob, new_name=blob.name.replace('raw_data/', 'updated_data/'))
                     if(jsonl!=0):
                         batch_data.append(jsonl)
                     print(batch_data)
@@ -50,7 +59,10 @@ def gcs_import():
                 else:
                     #load job config
                     print("load the job")
-                    bq_load_job(bq_client,batch_data,table_ref)
+                    try:
+                        bq_load_job(bq_client,batch_data,table_ref)
+                    except:
+                        print("Batch load could not be processed")
                     count=0
                     batch_data=[]
 
@@ -69,23 +81,29 @@ def xml_to_jsonl(client, bucket, blob):
                 data_dict = xmltodict.parse(xml_file.read())
                 data_dict=data_dict["cricsheet"]
 
+            #doesnt check for match type number
             if 'info' in data_dict and 'innings' in data_dict and \
-            'match_type_number' in data_dict['info'] and 'match_type' in data_dict['info'] and \
+                'match_type' in data_dict['info'] and \
             'lineups' in data_dict['info'] and 'lineup' in data_dict['info']['lineups'] and \
                 'inning' in data_dict['innings']:
+
+                print(blob.name)
+                logging.info(f"File {blob.name} satisfies file check!")
+                
                 deliveries=[]
                 for inning in data_dict['innings']['inning']:
                     deliveries+=inning['deliveries']['delivery']
                 data_new={
                 'match_type':data_dict['info']['match_type'],
                 'match_type_number':data_dict['info']['match_type_number'],
+                'file_name':blob.name,
                 'players':data_dict['info']['lineups']['lineup'][0]['players']['player']+data_dict['info']['lineups']['lineup'][0]['players']['player'],
                 'deliveries':deliveries
                 }
                 print("NEW JSON:",data_new)
 
                 file_name=(blob.name.split('/')[1]).split('.')[0]
-                object_name=f'{destination_folder}/{file_name}.jsonl'
+                object_name=f'{processed_folder}/{file_name}.jsonl'
                 print(object_name)
                 #creating new blob in processed folder
                 blob_new = bucket.blob(object_name)
