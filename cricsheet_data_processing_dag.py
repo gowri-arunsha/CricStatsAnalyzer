@@ -20,7 +20,7 @@ bucket_name='cric-stats-bucket'
 raw_folder='raw_data'
 processed_folder='processed_data'
 dataset_id='cricsheet_data'
-table_name='match_data'
+table_name='cric_data'
 
 def gcs_import():
     try:
@@ -45,7 +45,7 @@ def gcs_import():
         count=0
         batch_data=[]
         for blob in blobs:
-            logging.info("Processing file:",blob.name)
+            logging.info(f"Processing file:{blob.name}")
             if(blob.name.endswith(".xml")):
                 #assumption of batch data of 1000 files at a time
                 if(count<1000):
@@ -60,7 +60,7 @@ def gcs_import():
                         batch_data.append(jsonl)
                     count+=1
                 else:
-                    logging.info("Batch Data:",batch_data)
+                    logging.info(f"Batch Data:{batch_data}")
                     #load job config
                     print("load the job")
                     try:
@@ -71,12 +71,12 @@ def gcs_import():
                     batch_data=[]
 
         if len(batch_data)!=0:
-            logging.info("Batch Data:",batch_data)
+            logging.info(f"Batch Data:{batch_data}")
             print("load job")
             bq_load_job(bq_client,batch_data,table_ref)
 
     except Exception as e:
-        logging.error("GCS IMPORT ERROR:",e)
+        logging.error(f"GCS IMPORT ERROR:{e}")
 
 def xml_to_jsonl(client, bucket, blob):
     data_new={}
@@ -88,7 +88,7 @@ def xml_to_jsonl(client, bucket, blob):
             
             #file name extracted from blob
             file_name=(blob.name.split('/')[1]).split('.')[0]
-            logging.info("FILE NAME:",file_name)
+            logging.info(f"FILE NAME:{file_name}")
 
             #doesnt check for match type number
             if 'info' in data_dict and 'innings' in data_dict and \
@@ -100,7 +100,7 @@ def xml_to_jsonl(client, bucket, blob):
 
                 match_id=0
                 if('match_type_number' not in data_dict['info']):
-                    match_id=file_name
+                    match_id=int(file_name)
                 else:
                     match_id=data_dict['info']['match_type_number']
                 
@@ -113,13 +113,13 @@ def xml_to_jsonl(client, bucket, blob):
                 'players':data_dict['info']['lineups']['lineup'][0]['players']['player']+data_dict['info']['lineups']['lineup'][0]['players']['player'],
                 'deliveries':deliveries
                 }
-                logging.info("NEW JSON:",data_new)
+                logging.info(f"NEW JSON:{data_new}")
                 
             else:
                 logging.error("Data check not passed. Schema doesn't match requirements")
                 return 0
         except Exception as e:
-            logging.error("CANT OPEN FILE! error:",e)
+            logging.error(f"CANT OPEN FILE! error:{e}")
         else:
             object_name=f'{processed_folder}/{file_name}.jsonl'
             print(object_name)
@@ -127,13 +127,14 @@ def xml_to_jsonl(client, bucket, blob):
             blob_new = bucket.blob(object_name)
             with blob_new.open('w') as jsonl_file:
                 jsonl_file.write(json.dumps(data_new))
-            logging.info("Blob new:",blob_new)
+            logging.info(f"Blob new:{blob_new}")
             return data_new
 
     except Exception as e:
-        logging.error("XML TO JSON CONVERSION ERROR:",e)
+        logging.error(f"XML TO JSON CONVERSION ERROR:{e}")
 
 def bq_load_job(client,batch_data,table):
+    
     job_config = bigquery.LoadJobConfig(
         write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
         source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
@@ -142,8 +143,13 @@ def bq_load_job(client,batch_data,table):
         create_disposition=bigquery.CreateDisposition.CREATE_IF_NEEDED,
     )
 
-    load_job = client.load_table_from_json(batch_data, table, job_config = job_config)
-    load_job.result()
+    job_config.schema_update_options = [bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION]
+
+    try:
+        load_job = client.load_table_from_json(batch_data, table, job_config = job_config)
+        load_job.result()
+    except Exception as e:
+        logging.error(e)
 
 #DAG default parameters
 default_args = {
